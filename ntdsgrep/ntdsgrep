@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command -v pypykatz >/dev/null || {
+  echo "[!] pypykatz not found" >&2
+  exit 1
+}
+command -v ag >/dev/null || {
+  echo "[!] ag not found" >&2
+  exit 1
+}
+
+[ $# -lt 1 ] && {
+  echo "Usage: $(basename "$0") <password> [path]"
+  exit 1
+}
+
+PASSWORD=$1
+shift || true
+HASH=$(pypykatz crypto nt "$PASSWORD" | tr -d '\n')
+
+if [ ! -t 0 ]; then
+  ag "$HASH"
+  exit $?
+fi
+
+FILES=()
+
+if [ "${1-}" != "" ]; then
+  if [ -d "$1" ]; then
+    while IFS= read -r -d '' f; do FILES+=("$f"); done < <(find "$1" -type f -name '*.ntds' -print0)
+  else
+    FILES+=("$1")
+  fi
+else
+  while IFS= read -r -d '' f; do FILES+=("$f"); done < <(find . -maxdepth 1 -type f -name '*.ntds' -print0)
+  [ -d dcsync ] && while IFS= read -r -d '' f; do FILES+=("$f"); done < <(find dcsync -type f -name '*.ntds' -print0)
+fi
+
+[ ${#FILES[@]} -eq 0 ] && {
+  echo "[!] No .ntds files found" >&2
+  exit 1
+}
+
+ag "$HASH" "${FILES[@]}"
