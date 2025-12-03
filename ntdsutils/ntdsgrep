@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-command -v pypykatz >/dev/null || {
-  echo "[!] pypykatz not found" >&2
+command -v nthash >/dev/null || {
+  echo "[!] nthash not found (install ntdsutils/nthash and add it to PATH)" >&2
   exit 1
 }
 command -v ag >/dev/null || {
@@ -17,7 +17,7 @@ command -v ag >/dev/null || {
 
 PASSWORD=$1
 shift || true
-HASH=$(pypykatz crypto nt "$PASSWORD" | tr -d '\n')
+HASH=$(nthash "$PASSWORD" | tr -d '\n')
 
 if [ ! -t 0 ]; then
   ag "$HASH"

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+nthash() {
+    local password
+
+    # Use first argument when provided, otherwise read from stdin (supports piping)
+    if [ -n "${1-}" ]; then
+        password="$1"
+    else
+        read -r password
+    fi
+
+    if command -v iconv >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1; then
+        printf %s "$password" | iconv -t utf16le | openssl dgst -md4 -provider legacy | awk '{print $2}'
+    elif command -v pypykatz >/dev/null 2>&1; then
+        pypykatz crypto nt "$password"
+    else
+        echo "Error: Required dependencies are not installed." >&2
+        return 1
+    fi
+}
+
+nthash "$@"

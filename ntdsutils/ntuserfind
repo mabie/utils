@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: $(basename "$0") [-p potfile] <username> [path]" >&2
+  exit 1
+}
+
+C_RESET='\033[0m'
+C_BOLD='\033[1m'
+C_GREEN='\033[32m'
+C_CYAN='\033[36m'
+C_GOLD='\033[33m'
+
+command -v ag >/dev/null || {
+  echo "Error: ag (silver searcher) not found." >&2
+  exit 1
+}
+command -v fzf >/dev/null || {
+  echo "Error: fzf not found." >&2
+  exit 1
+}
+
+potfile_override=""
+while getopts ":p:" opt; do
+  case "$opt" in
+  p) potfile_override="$OPTARG" ;;
+  *) usage ;;
+  esac
+done
+shift $((OPTIND - 1))
+[[ $# -lt 1 ]] && usage
+
+username=$1
+search_path="${2-.}"
+
+extract_nthash() {
+  local nthash
+  nthash=$(echo "$1" | cut -d ':' -f4)
+  if [[ -z "$nthash" ]]; then
+    echo "${C_GOLD}[!] Error parsing NTLM hash from record${C_RESET}" >&2
+    return 1
+  fi
+  echo "$nthash"
+}
+
+get_potfile_password() {
+  local hash=$1
+  shift
+  local files=("$@")
+
+  for pf in "${files[@]}"; do
+    [[ -f "$pf" ]] || continue
+    local match
+    match=$(grep -m 1 -i "^${hash}:" "$pf" || true)
+    if [[ -n "$match" ]]; then
+      echo "${match#*:}"
+      return 0
+    fi
+  done
+  echo ""
+}
+
+select_match() {
+  local input_data=$1
+  [[ -z "$input_data" ]] && {
+    echo -e "${C_GOLD}[!] No matches found for user: $username${C_RESET}" >&2
+    exit 1
+  }
+
+  if [[ $(grep -c '^' <<<"$input_data") -eq 1 ]]; then
+    echo "$input_data"
+    return
+  fi
+
+  local fzf_input
+  fzf_input=$(while read -r line; do
+    local file_part="-" user_part="<unknown>"
+    if [[ "$line" =~ ^([^:]+):([0-9]+):(.*)$ ]]; then
+      file_part="${BASH_REMATCH[1]}"
+      user_part=$(echo "${BASH_REMATCH[3]}" | cut -d: -f1)
+    elif [[ "$line" =~ ^([0-9]+):(.*)$ ]]; then
+      user_part=$(echo "${BASH_REMATCH[2]}" | cut -d: -f1)
+    fi
+    printf "%s (%s)\t%s\n" "$user_part" "$file_part" "$line"
+  done <<<"$input_data")
+
+  local selection
+  selection=$(echo "$fzf_input" | fzf --multi --delimiter=$'\t' --with-nth=1 --prompt="Select user(s) > ")
+
+  [[ -z "$selection" ]] && {
+    echo "[!] No selection made" >&2
+    exit 1
+  }
+
+  echo "$selection" | awk -F'\t' '{print $2}'
+}
+
+matches=""
+if [[ -p /dev/stdin || (! -t 0 && -s /dev/stdin) ]]; then
+  matches=$(ag -a -i --nocolor --noheading "$username" || true)
+else
+  matches=$(ag -a -i --nocolor --noheading --numbers -Q -G '\.ntds$' "$username" "$search_path" || true)
+fi
+
+selected_lines=$(select_match "$matches")
+
+declare -a output_buffer
+
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+
+  file="-"
+  record="$line"
+
+  if [[ "$line" =~ ^([^:]+):([0-9]+):(.*)$ ]]; then
+    file="${BASH_REMATCH[1]}"
+    record="${BASH_REMATCH[3]}"
+  elif [[ "$line" =~ ^([0-9]+):(.*)$ ]]; then
+    file="<single_file>"
+    record="${BASH_REMATCH[2]}"
+  fi
+
+  nt_hash=$(extract_nthash "$record")
+  user_field=$(echo "$record" | cut -d ':' -f1)
+
+  potfiles=()
+  [[ -n "$potfile_override" ]] && potfiles+=("$potfile_override")
+
+  if [[ "$file" != "-" && "$file" != "<single_file>" ]]; then
+    base_pot="${file%.ntds}.pot"
+    [[ -f "$base_pot" ]] && potfiles+=("$base_pot")
+
+    dir=$(dirname "$file")
+    while IFS= read -r -d '' pf; do
+      [[ " ${potfiles[*]} " != *" $pf "* ]] && potfiles+=("$pf")
+    done < <(find "$dir" -maxdepth 1 -type f -name '*.pot' -print0 2>/dev/null)
+  fi
+
+  cleartext=$(get_potfile_password "$nt_hash" "${potfiles[@]}")
+
+  if [[ -n "$cleartext" ]]; then
+    output_buffer+=("2"$'\t'"$file"$'\t'"$user_field"$'\t'"$cleartext"$'\t'"$nt_hash")
+  else
+    output_buffer+=("1"$'\t'"$file"$'\t'"$user_field"$'\t'"__NOPASS__"$'\t'"$nt_hash")
+  fi
+
+done <<<"$selected_lines"
+
+if [[ ${#output_buffer[@]} -gt 0 ]]; then
+  IFS=$'\n' sorted_output=($(sort -t $'\t' -k1,1 -k2,2 -k3,3 <<<"${output_buffer[*]}"))
+  unset IFS
+
+  for entry in "${sorted_output[@]}"; do
+    IFS=$'\t' read -r status_code f_domain f_user f_pass f_hash <<<"$entry"
+
+    if [[ "$status_code" == "1" ]]; then
+      printf "%b[MATCH]%b   %b%s%b\n" \
+        "${C_GOLD}${C_BOLD}" "${C_RESET}" \
+        "${C_CYAN}" "$f_user" "${C_RESET}" >&2
+    else
+      printf "%b[CRACKED]%b %b%s%b:%b%s%b\n" \
+        "${C_GREEN}${C_BOLD}" "${C_RESET}" \
+        "${C_CYAN}" "$f_user" "${C_RESET}" \
+        "${C_GREEN}${C_BOLD}" "$f_pass" "${C_RESET}" >&2
+    fi
+
+    echo "$f_hash"
+  done
+fi
