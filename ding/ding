@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+usage() {
+  printf 'Usage: %s <command> [argument ...]\n' "$(basename "$0")" >&2
+  exit 2
+}
+
+[[ $# -gt 0 ]] || usage
+
+if ! command -v notify-send >/dev/null 2>&1; then
+  echo "Error: notify-send not found." >&2
+  exit 127
+fi
+
+if ! command -v "$1" >/dev/null 2>&1; then
+  printf 'Error: command not found: %s\n' "$1" >&2
+  exit 127
+fi
+
+command_text=''
+printf -v command_text '%q ' "$@"
+command_text=${command_text% }
+
+(
+  "$@" </dev/null >/dev/null 2>&1
+  status=$?
+
+  if (( status == 0 )); then
+    notification_body="$command_text finished"
+  else
+    notification_body="$command_text finished with exit status $status"
+  fi
+
+  if ! notify-send -u critical 'Process finished' "$notification_body"; then
+    echo 'Warning: notify-send failed.' >&2
+  fi
+) &
+
+job_pid=$!
+disown "$job_pid" 2>/dev/null || true
+
+exit 0
